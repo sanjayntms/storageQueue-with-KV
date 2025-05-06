@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>NTMS Azure Batch - Image Hub</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #f0f2f5, #e1e6ed);
+            margin: 0;
+            padding: 0;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            perspective: 1000px;
+        }
+
+        .container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 12px 30px rgba(0, 0, 0, 0.15);
+            padding: 40px;
+            width: 90%;
+            max-width: 1300px;
+            transform: rotateY(5deg);
+            transition: transform 0.5s ease;
+        }
+
+        .container:hover {
+            transform: rotateY(0deg);
+        }
+
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            margin-bottom: 40px;
+            font-weight: 800;
+            letter-spacing: 2px;
+            text-shadow: 2px 2px 5px rgba(0,0,0,0.1);
+        }
+
+        form {
+            text-align: center;
+            margin-bottom: 40px;
+        }
+
+        input[type="file"] {
+            padding: 12px;
+            margin: 15px 0;
+            border: 2px dashed #3498db;
+            border-radius: 10px;
+            width: 80%;
+            max-width: 300px;
+            background: #ecf0f1;
+            cursor: pointer;
+            transition: background 0.3s ease-in-out;
+        }
+
+        input[type="file"]:hover {
+            background: #d0e6f7;
+        }
+
+        button {
+            padding: 14px 24px;
+            background: #3498db;
+            border: none;
+            color: white;
+            font-size: 16px;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: background 0.3s ease-in-out, transform 0.2s ease-in-out;
+            box-shadow: 0 4px 10px rgba(0, 0, 0, 0.15);
+        }
+
+        button:hover {
+            background: #2980b9;
+            transform: scale(1.05);
+        }
+
+        .section {
+            margin-bottom: 60px;
+            border-bottom: 2px solid #ddd;
+            padding-bottom: 40px;
+        }
+
+        .section:last-child {
+            border-bottom: none;
+        }
+
+        .section h2 {
+            color: #34495e;
+            margin-bottom: 25px;
+            font-weight: 700;
+            border-bottom: 3px solid #3498db;
+            padding-bottom: 10px;
+            text-align: center;
+            text-transform: uppercase;
+        }
+
+        .gallery {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 30px;
+            margin-top: 30px;
+        }
+
+        .thumbnail {
+            width: 300px;
+            height: 300px;
+            border-radius: 15px;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+            transition: transform 0.3s ease-in-out, box-shadow 0.3s ease-in-out;
+            cursor: pointer;
+            object-fit: cover;
+        }
+
+        .thumbnail:hover {
+            transform: scale(1.08) rotate(3deg);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.25);
+        }
+
+        .processed-gallery {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+            gap: 20px;
+            margin-top: 30px;
+            align-items: center;
+        }
+
+        .processed-thumbnail {
+            width: 80px;
+            height: 80px;
+            border-radius: 10px;
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+            transition: transform 0.3s ease-in-out, box-shadow 0.3s ease-in-out;
+            cursor: pointer;
+            object-fit: cover;
+        }
+
+        .processed-thumbnail:hover {
+            transform: scale(1.1) rotate(-3deg);
+            box-shadow: 0 6px 18px rgba(0, 0, 0, 0.2);
+        }
+
+        /* Lightbox styles */
+        #lightbox {
+            display: none;
+            position: fixed;
+            z-index: 10000;
+            padding: 60px;
+            background: rgba(0, 0, 0, 0.9);
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            justify-content: center;
+            align-items: center;
+            cursor: pointer;
+        }
+
+        #lightbox img {
+            max-width: 95%;
+            max-height: 95%;
+            border-radius: 15px;
+            box-shadow: 0 15px 40px rgba(0, 0, 0, 0.4);
+            animation: zoomIn 0.3s ease;
+        }
+
+        @keyframes zoomIn {
+            from { transform: scale(0.7); opacity: 0; }
+            to { transform: scale(1); opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>NTMS Azure Batch - PoC Blobs and Queue without KV</h1>
+
+        <form action="/upload" method="post" enctype="multipart/form-data">
+            <input type="file" name="file" required>
+            <br>
+            <button type="submit">
+                <span>
+                    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-upload" viewBox="0 0 16 16" style="margin-right: 8px; vertical-align: middle;">
+                        <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5z"/>
+                        <path d="M7.646 1.146a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 2.707V11.5a.5.5 0 0 1-1 0V2.707L4.354 4.854a.5.5 0 1 1-.708-.708l3-3z"/>
+                    </svg>
+                </span> Upload Image
+            </button>
+        </form>
+
+        <div class="section">
+            <h2>Uploaded Images</h2>
+            {% if uploaded_blobs %}
+                <div class="gallery">
+                    {% for img_url in uploaded_blobs %}
+                        <img src="{{ img_url }}" alt="Uploaded Image" class="thumbnail" onclick="openLightbox('{{ img_url }}')">
+                    {% endfor %}
+                </div>
+            {% else %}
+                <p style="color: #777; text-align: center;">No uploaded images yet.</p>
+            {% endif %}
+        </div>
+
+        <div class="section">
+            <h2>Processed Thumbnails</h2>
+            {% if processed_blobs %}
+                <div class="processed-gallery">
+                    {% for img_url in processed_blobs %}
+                        <img src="{{ img_url }}" alt="Processed Thumbnail" class="processed-thumbnail" onclick="openLightbox('{{ img_url.replace('thumbnail_quarter_', '') }}')">
+                    {% endfor %}
+                </div>
+            {% else %}
+                <p style="color: #777; text-align: center;">No processed images yet.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <div id="lightbox" onclick="closeLightbox()">
+        <img id="lightbox-img" src="" alt="Full Size Image">
+    </div>
+
+    <script>
+        function openLightbox(src) {
+            const lightbox = document.getElementById('lightbox');
+            const img = document.getElementById('lightbox-img');
+            img.src = src;
+            lightbox.style.display = 'flex';
+        }
+        function closeLightbox() {
+            document.getElementById('lightbox').style.display = 'none';
+        }
+    </script>
+</body>
+</html>
+
