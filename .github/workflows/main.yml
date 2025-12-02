@@ -1,3 +1,4 @@
+# .github/workflows/main.yml
 name: Deploy Full StorageQueue + KV + VM
 
 on:
@@ -12,24 +13,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-
-      # ------------------------------
-      # CHECKOUT REPO
-      # ------------------------------
       - name: Checkout Repo
         uses: actions/checkout@v4
 
-      # ------------------------------
-      # LOGIN TO AZURE
-      # ------------------------------
       - name: Azure Login
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # ------------------------------
-      # ENV VARIABLES
-      # ------------------------------
       - name: Set environment values
         run: |
           echo "RG_NAME=ntms-kv-vm-rg" >> $GITHUB_ENV
@@ -44,18 +35,12 @@ jobs:
           echo "PROCESSED_CONTAINER=processed-images" >> $GITHUB_ENV
           echo "SECRET_NAME=AZURE-STORAGE-CONNECTION-STRING" >> $GITHUB_ENV
 
-      # ------------------------------
-      # RESOURCE GROUP
-      # ------------------------------
       - name: Create Resource Group
         run: |
           az group create \
-             --name $RG_NAME \
-             --location $LOCATION
+            --name $RG_NAME \
+            --location $LOCATION
 
-      # ------------------------------
-      # KEY VAULT
-      # ------------------------------
       - name: Create Key Vault
         run: |
           az keyvault create \
@@ -64,9 +49,6 @@ jobs:
             --location $LOCATION \
             --enable-rbac-authorization false
 
-      # ------------------------------
-      # STORAGE ACCOUNT + QUEUE + CONTAINERS
-      # ------------------------------
       - name: Create Storage Account
         run: |
           az storage account create \
@@ -93,9 +75,6 @@ jobs:
           az storage container create --name $UPLOADED_CONTAINER --account-name $STORAGE_NAME
           az storage container create --name $PROCESSED_CONTAINER --account-name $STORAGE_NAME
 
-      # ------------------------------
-      # NETWORK + IP + NIC + VM
-      # ------------------------------
       - name: Create VNet + Subnet
         run: |
           az network vnet create \
@@ -132,42 +111,38 @@ jobs:
             --nics ${VM_NAME}-nic \
             --size Standard_B1s
 
-      # ------------------------------
-      # GET PUBLIC IP DYNAMICALLY
-      # ------------------------------
       - name: Get VM Public IP
         id: getip
         run: |
-          IP=$(az vm list-ip-addresses \
-            --resource-group $RG_NAME \
-            --name $VM_NAME \
-            --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
+          IP=$(az vm list-ip-addresses --resource-group $RG_NAME --name $VM_NAME --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
+          if [ -z "$IP" ] || [ "$IP" = "null" ]; then
+            echo "Failed to fetch VM IP" >&2
+            exit 1
+          fi
           echo "VM_IP=$IP" >> $GITHUB_ENV
           echo "VM_IP=$IP"
         shell: bash
 
-      # ------------------------------
-      # MANAGED IDENTITY + KV ACCESS
-      # ------------------------------
-      - name: Enable MI
+      - name: Enable Managed Identity on VM
         run: |
           az vm identity assign --resource-group $RG_NAME --name $VM_NAME
 
-      - name: Grant GET permissions
+      - name: Grant Key Vault secret GET permission to VM
         run: |
           PRINCIPAL_ID=$(az vm show --resource-group $RG_NAME --name $VM_NAME --query identity.principalId -o tsv)
+          if [ -z "$PRINCIPAL_ID" ] || [ "$PRINCIPAL_ID" = "null" ]; then
+            echo "Failed to fetch principal id" >&2
+            exit 1
+          fi
           az keyvault set-policy \
             --name $KV_NAME \
             --object-id $PRINCIPAL_ID \
             --secret-permissions get
 
-      - name: Open port 3000
+      - name: Open port 3000 on VM
         run: |
           az vm open-port --resource-group $RG_NAME --name $VM_NAME --port 3000 --priority 300
 
-      # ------------------------------
-      # COPY APPLICATION FILES TO VM
-      # ------------------------------
       - name: Copy repo to VM
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -177,9 +152,6 @@ jobs:
           source: "."
           target: "/opt/ntms-kv-blob-queue"
 
-      # ------------------------------
-      # RUN SETUP SCRIPT
-      # ------------------------------
       - name: Run setup script on VM
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -187,14 +159,11 @@ jobs:
           username: vmadmin
           password: ${{ secrets.VM_PASSWORD }}
           script: |
-            cd /opt/ntms-kv-blob-queue
-            chmod +x setup_storagequeue.sh
+            cd /opt/ntms-kv-blob-queue || exit 1
+            chmod +x setup_storagequeue.sh || true
             export KEY_VAULT_URI="https://$KV_NAME.vault.azure.net/"
             ./setup_storagequeue.sh
 
-      # ------------------------------
-      # INSTALL SYSTEMD SERVICES
-      # ------------------------------
       - name: Install systemd services
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -202,6 +171,7 @@ jobs:
           username: vmadmin
           password: ${{ secrets.VM_PASSWORD }}
           script: |
+            # create app.service
             sudo bash -c 'cat > /etc/systemd/system/app.service <<EOF
 [Unit]
 Description=NTMS Flask App (StorageQueue + KeyVault)
@@ -219,6 +189,7 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF'
 
+            # create worker.service
             sudo bash -c 'cat > /etc/systemd/system/worker.service <<EOF
 [Unit]
 Description=NTMS Queue Worker
@@ -241,4 +212,4 @@ EOF'
             sudo systemctl restart app.service worker.service
 
       - name: Completed
-        run: echo "Deployment successful! VM IP: $VM_IP"
+        run: echo "Deployment successful! VM IP: ${{ env.VM_IP }}"
