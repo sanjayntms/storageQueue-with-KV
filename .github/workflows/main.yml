@@ -1,4 +1,4 @@
-name: Deploy Full StorageQueue + KV + VM (Idempotent)
+name: Deploy StorageQueue + KV + VM (Idempotent)
 
 on:
   workflow_dispatch:
@@ -27,24 +27,24 @@ jobs:
 
     steps:
 
-      - name: Checkout repo
+      - name: Checkout Repo
         uses: actions/checkout@v4
 
-      - name: Azure login
+      - name: Azure Login
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      # --------------------------------------------------------------
+      ############################################################
       # RESOURCE GROUP
-      # --------------------------------------------------------------
+      ############################################################
       - name: Create RG
         run: |
           az group create --name "$RG_NAME" --location "$LOCATION"
 
-      # --------------------------------------------------------------
+      ############################################################
       # KEY VAULT
-      # --------------------------------------------------------------
+      ############################################################
       - name: Create Key Vault (Idempotent)
         run: |
           if az keyvault show --name "$KV_NAME" >/dev/null 2>&1; then
@@ -57,13 +57,13 @@ jobs:
               --enable-rbac-authorization false
           fi
 
-      # --------------------------------------------------------------
+      ############################################################
       # STORAGE
-      # --------------------------------------------------------------
+      ############################################################
       - name: Create Storage Account (Idempotent)
         run: |
           if az storage account show --name "$STORAGE_NAME" >/dev/null 2>&1; then
-            echo "Storage account exists."
+            echo "Storage exists."
           else
             az storage account create \
               --name "$STORAGE_NAME" \
@@ -73,7 +73,7 @@ jobs:
               --kind StorageV2
           fi
 
-      - name: Save storage connection string
+      - name: Save Storage Connection String to Key Vault
         run: |
           conn=$(az storage account show-connection-string --resource-group "$RG_NAME" --name "$STORAGE_NAME" -o tsv)
           az keyvault secret set \
@@ -81,15 +81,15 @@ jobs:
             --name "$SECRET_NAME" \
             --value "$conn"
 
-      - name: Create queue & containers
+      - name: Create Queue + Containers
         run: |
           az storage queue create --name "$QUEUE_NAME" --account-name "$STORAGE_NAME"
           az storage container create --name "$UPLOADED_CONTAINER" --account-name "$STORAGE_NAME"
           az storage container create --name "$PROCESSED_CONTAINER" --account-name "$STORAGE_NAME"
 
-      # --------------------------------------------------------------
-      # NETWORK
-      # --------------------------------------------------------------
+      ############################################################
+      # NETWORKING
+      ############################################################
       - name: Create VNet
         run: |
           if az network vnet show --resource-group "$RG_NAME" --name ntms-vnet >/dev/null 2>&1; then
@@ -113,7 +113,7 @@ jobs:
               --name "${VM_NAME}-nsg"
           fi
 
-      - name: Allow SSH Port 22
+      - name: Allow SSH port 22
         run: |
           if az network nsg rule show --resource-group "$RG_NAME" --nsg-name "${VM_NAME}-nsg" --name allow-22 >/dev/null 2>&1; then
             echo "SSH rule exists."
@@ -129,7 +129,7 @@ jobs:
               --direction Inbound
           fi
 
-      - name: Allow App Port 3000
+      - name: Allow App port 3000
         run: |
           if az network nsg rule show --resource-group "$RG_NAME" --nsg-name "${VM_NAME}-nsg" --name allow-3000 >/dev/null 2>&1; then
             echo "Port 3000 rule exists."
@@ -170,9 +170,9 @@ jobs:
               --public-ip-address "${VM_NAME}-ip"
           fi
 
-      # --------------------------------------------------------------
+      ############################################################
       # VM
-      # --------------------------------------------------------------
+      ############################################################
       - name: Create VM (Idempotent)
         run: |
           if az vm show --resource-group "$RG_NAME" --name "$VM_NAME" >/dev/null 2>&1; then
@@ -188,44 +188,45 @@ jobs:
               --size Standard_B1s
           fi
 
-      - name: Get VM IP
+      - name: Get VM Public IP
         id: getvmip
         run: |
-          IP=$(az vm list-ip-addresses --resource-group "$RG_NAME" --name "$VM_NAME" \
-            --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
-          echo "vm_ip=$IP" >> $GITHUB_OUTPUT
+          ip=$(az vm list-ip-addresses --resource-group "$RG_NAME" --name "$VM_NAME" \
+                --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
+          echo "vm_ip=$ip" >> $GITHUB_OUTPUT
 
-      # --------------------------------------------------------------
+      ############################################################
       # MANAGED IDENTITY + KV ACCESS
-      # --------------------------------------------------------------
+      ############################################################
       - name: Enable Managed Identity
         run: |
           az vm identity assign --resource-group "$RG_NAME" --name "$VM_NAME"
 
       - name: Allow VM to read Key Vault secret
         run: |
-          PID=$(az vm show --resource-group "$RG_NAME" --name "$VM_NAME" --query identity.principalId -o tsv)
+          PID=$(az vm show --resource-group "$RG_NAME" --name "$VM_NAME" \
+                 --query identity.principalId -o tsv)
           az keyvault set-policy \
             --name "$KV_NAME" \
             --object-id "$PID" \
             --secret-permissions get
 
-      # --------------------------------------------------------------
+      ############################################################
       # PREPARE DEPLOYMENT FOLDER
-      # --------------------------------------------------------------
+      ############################################################
       - name: Prepare folder on VM
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.getvmip.outputs.vm_ip }}
-          username: ${{ env.ADMIN_USER }}
+          username: vmadmin
           password: ${{ secrets.VM_PASSWORD }}
           script: |
             sudo mkdir -p /opt/ntms-kv-blob-queue
             sudo chown vmadmin:vmadmin /opt/ntms-kv-blob-queue
 
-      # --------------------------------------------------------------
+      ############################################################
       # COPY SOURCE CODE
-      # --------------------------------------------------------------
+      ############################################################
       - name: Copy repo to VM
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -235,9 +236,9 @@ jobs:
           source: "."
           target: "/opt/ntms-kv-blob-queue"
 
-      # --------------------------------------------------------------
+      ############################################################
       # CREATE setup.sh ON VM
-      # --------------------------------------------------------------
+      ############################################################
       - name: Create setup.sh on VM
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -246,37 +247,36 @@ jobs:
           password: ${{ secrets.VM_PASSWORD }}
           script: |
             sudo tee /opt/ntms-kv-blob-queue/setup.sh > /dev/null << 'EOF'
-            #!/bin/bash
-            set -e
-            cd /opt/ntms-kv-blob-queue
+#!/bin/bash
+set -e
+cd /opt/ntms-kv-blob-queue
 
-            sudo apt update -y
-            sudo apt install -y python3 python3-pip python3-venv
+sudo apt update -y
+sudo apt install -y python3 python3-pip python3-venv
 
-            if [ ! -d "venv" ]; then
-            python3 -m venv venv
-            fi
+if [ ! -d "venv" ]; then
+  python3 -m venv venv
+fi
 
-            source venv/bin/activate
+source venv/bin/activate
 
-            pip install --upgrade pip
-            pip install Flask azure-storage-blob azure-storage-queue Pillow azure-identity azure-keyvault-secrets
+pip install --upgrade pip
+pip install Flask azure-storage-blob azure-storage-queue Pillow azure-identity azure-keyvault-secrets
 
-            mkdir -p templates logs
+mkdir -p templates logs
 
-            pkill -f worker.py || true
-            nohup python3 worker.py > logs/worker.log 2>&1 &
+pkill -f worker.py || true
+nohup python3 worker.py > logs/worker.log 2>&1 &
 
-            pkill -f app.py || true
-            nohup python3 app.py > logs/app.log 2>&1 &
-
-            EOF
+pkill -f app.py || true
+nohup python3 app.py > logs/app.log 2>&1 &
+EOF
 
             sudo chmod +x /opt/ntms-kv-blob-queue/setup.sh
 
-      # --------------------------------------------------------------
+      ############################################################
       # RUN setup.sh
-      # --------------------------------------------------------------
+      ############################################################
       - name: Run setup.sh on VM
         uses: appleboy/ssh-action@v1.1.0
         with:
@@ -288,50 +288,31 @@ jobs:
             export KEY_VAULT_URI="https://$KV_NAME.vault.azure.net/"
             ./setup.sh
 
-      # --------------------------------------------------------------
-      # SYSTEMD SERVICES
-      # --------------------------------------------------------------
-      - name: Install systemd services
+      ############################################################
+      # INSTALL SYSTEMD SERVICES FROM REPO
+      ############################################################
+      - name: Install systemd services from repo
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.getvmip.outputs.vm_ip }}
           username: vmadmin
           password: ${{ secrets.VM_PASSWORD }}
           script: |
-            sudo tee /etc/systemd/system/app.service > /dev/null << 'EOF'
-             [Unit]
-             Description=NTMS Flask App
-             After=network.target
-             [Service]
-             User=vmadmin
-             WorkingDirectory=/opt/ntms-kv-blob-queue
-             Environment="KEY_VAULT_URI=https://ntmsrhkv2.vault.azure.net/"
-             ExecStart=/opt/ntms-kv-blob-queue/venv/bin/python3 app.py
-             Restart=always
-             [Install]
-             WantedBy=multi-user.target
-             EOF
+            sudo cp /opt/ntms-kv-blob-queue/services/app.service /etc/systemd/system/app.service
+            sudo cp /opt/ntms-kv-blob-queue/services/worker.service /etc/systemd/system/worker.service
 
-            sudo tee /etc/systemd/system/worker.service > /dev/null << 'EOF'
-            [Unit]
-            Description=NTMS Queue Worker
-            After=network.target
-            [Service]
-            User=vmadmin
-            WorkingDirectory=/opt/ntms-kv-blob-queue
-            Environment="KEY_VAULT_URI=https://ntmsrhkv2.vault.azure.net/"
-            ExecStart=/opt/ntms-kv-blob-queue/venv/bin/python3 worker.py
-            Restart=always
-            [Install]
-            WantedBy=multi-user.target
-            EOF
+            sudo chmod 644 /etc/systemd/system/app.service
+            sudo chmod 644 /etc/systemd/system/worker.service
 
             sudo systemctl daemon-reload
             sudo systemctl enable app.service worker.service
             sudo systemctl restart app.service worker.service
 
+      ############################################################
+      # COMPLETED
+      ############################################################
       - name: Completed
         run: |
-          echo "Deployment successful!"
+          echo "Deployment complete!"
           echo "VM IP: ${{ steps.getvmip.outputs.vm_ip }}"
-          echo "APP URL = http://${{ steps.getvmip.outputs.vm_ip }}:3000"
+          echo "App URL: http://${{ steps.getvmip.outputs.vm_ip }}:3000"
