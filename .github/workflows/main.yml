@@ -1,4 +1,4 @@
-name: Deploy Full StorageQueue + KV + VM
+name: Deploy Full StorageQueue + KV + VM (Idempotent)
 
 on:
   workflow_dispatch:
@@ -17,14 +17,16 @@ jobs:
       KV_NAME: ntmsrhkv2
       VM_NAME: ntmsqueuevm
       ADMIN_USER: vmadmin
-      STORAGE_NAME: ntmsstor${{ github.run_id }}
+      ADMIN_PASS: ${{ secrets.VM_PASSWORD }}
+
+      STORAGE_NAME: ntmsstorntms999
       QUEUE_NAME: image-processing-queue
       UPLOADED_CONTAINER: uploaded-images
       PROCESSED_CONTAINER: processed-images
       SECRET_NAME: AZURE-STORAGE-CONNECTION-STRING
-      ADMIN_PASS: ${{ secrets.VM_PASSWORD }}
 
     steps:
+
       - name: Checkout repo
         uses: actions/checkout@v4
 
@@ -33,16 +35,21 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Create resource group
+      # --------------------------------------------------------------
+      # RESOURCE GROUP
+      # --------------------------------------------------------------
+      - name: Create RG
         run: |
           az group create --name "$RG_NAME" --location "$LOCATION"
 
+      # --------------------------------------------------------------
+      # KEY VAULT
+      # --------------------------------------------------------------
       - name: Create Key Vault (Idempotent)
         run: |
-          if az keyvault show --name "$KV_NAME" --resource-group "$RG_NAME" >/dev/null 2>&1; then
-            echo "Key Vault $KV_NAME already exists. Skipping creation."
+          if az keyvault show --name "$KV_NAME" >/dev/null 2>&1; then
+            echo "Key Vault exists."
           else
-            echo "Creating Key Vault $KV_NAME..."
             az keyvault create \
               --name "$KV_NAME" \
               --resource-group "$RG_NAME" \
@@ -50,59 +57,63 @@ jobs:
               --enable-rbac-authorization false
           fi
 
-
-      - name: Create Storage Account
+      # --------------------------------------------------------------
+      # STORAGE
+      # --------------------------------------------------------------
+      - name: Create Storage Account (Idempotent)
         run: |
-          az storage account create \
-            --name "$STORAGE_NAME" \
-            --resource-group "$RG_NAME" \
-            --location "$LOCATION" \
-            --sku Standard_LRS \
-            --kind StorageV2
+          if az storage account show --name "$STORAGE_NAME" >/dev/null 2>&1; then
+            echo "Storage account exists."
+          else
+            az storage account create \
+              --name "$STORAGE_NAME" \
+              --resource-group "$RG_NAME" \
+              --location "$LOCATION" \
+              --sku Standard_LRS \
+              --kind StorageV2
+          fi
 
-      - name: Save storage connection string to Key Vault
+      - name: Save storage connection string
         run: |
           conn=$(az storage account show-connection-string --resource-group "$RG_NAME" --name "$STORAGE_NAME" -o tsv)
-          az keyvault secret set --vault-name "$KV_NAME" --name "$SECRET_NAME" --value "$conn"
+          az keyvault secret set \
+            --vault-name "$KV_NAME" \
+            --name "$SECRET_NAME" \
+            --value "$conn"
 
-      - name: Create queue and blob containers
+      - name: Create queue & containers
         run: |
           az storage queue create --name "$QUEUE_NAME" --account-name "$STORAGE_NAME"
           az storage container create --name "$UPLOADED_CONTAINER" --account-name "$STORAGE_NAME"
           az storage container create --name "$PROCESSED_CONTAINER" --account-name "$STORAGE_NAME"
 
-      - name: Create VNet and subnet
+      # --------------------------------------------------------------
+      # NETWORK
+      # --------------------------------------------------------------
+      - name: Create VNet
         run: |
-          az network vnet create \
-            --resource-group "$RG_NAME" \
-            --name ntms-vnet \
-            --address-prefix 10.1.0.0/16 \
-            --subnet-name default \
-            --subnet-prefix 10.1.1.0/24
-
-      # ----------------------------
-      # CREATE NSG + RULE FOR PORT 3000
-      # ----------------------------
+          if az network vnet show --resource-group "$RG_NAME" --name ntms-vnet >/dev/null 2>&1; then
+            echo "VNet exists."
+          else
+            az network vnet create \
+              --resource-group "$RG_NAME" \
+              --name ntms-vnet \
+              --address-prefix 10.1.0.0/16 \
+              --subnet-name default \
+              --subnet-prefix 10.1.1.0/24
+          fi
 
       - name: Create NSG
         run: |
-          az network nsg create \
-            --resource-group "$RG_NAME" \
-            --name "${VM_NAME}-nsg"
+          if az network nsg show --resource-group "$RG_NAME" --name "${VM_NAME}-nsg" >/dev/null 2>&1; then
+            echo "NSG exists."
+          else
+            az network nsg create \
+              --resource-group "$RG_NAME" \
+              --name "${VM_NAME}-nsg"
+          fi
 
-      - name: Create NSG rule for port 3000
-        run: |
-          az network nsg rule create \
-            --resource-group "$RG_NAME" \
-            --nsg-name "${VM_NAME}-nsg" \
-            --name allow-3000 \
-            --protocol Tcp \
-            --priority 300 \
-            --destination-port-ranges 3000 \
-            --access Allow \
-            --direction Inbound
-
-      - name: Create NSG rule for SSH (port 22)
+      - name: Allow SSH Port 22
         run: |
           if az network nsg rule show --resource-group "$RG_NAME" --nsg-name "${VM_NAME}-nsg" --name allow-22 >/dev/null 2>&1; then
             echo "SSH rule exists."
@@ -118,94 +129,209 @@ jobs:
               --direction Inbound
           fi
 
-
-      # ----------------------------
-      # PUBLIC IP + NIC WITH NSG
-      # ----------------------------
-
-      - name: Create public IP
+      - name: Allow App Port 3000
         run: |
-          az network public-ip create \
-            --resource-group "$RG_NAME" \
-            --name "${VM_NAME}-ip" \
-            --allocation-method Static
+          if az network nsg rule show --resource-group "$RG_NAME" --nsg-name "${VM_NAME}-nsg" --name allow-3000 >/dev/null 2>&1; then
+            echo "Port 3000 rule exists."
+          else
+            az network nsg rule create \
+              --resource-group "$RG_NAME" \
+              --nsg-name "${VM_NAME}-nsg" \
+              --name allow-3000 \
+              --protocol Tcp \
+              --priority 300 \
+              --destination-port-ranges 3000 \
+              --access Allow \
+              --direction Inbound
+          fi
 
-      - name: Create NIC (attach NSG)
+      - name: Create Public IP
         run: |
-          az network nic create \
-            --resource-group "$RG_NAME" \
-            --name "${VM_NAME}-nic" \
-            --vnet-name ntms-vnet \
-            --subnet default \
-            --network-security-group "${VM_NAME}-nsg" \
-            --public-ip-address "${VM_NAME}-ip"
+          if az network public-ip show --resource-group "$RG_NAME" --name "${VM_NAME}-ip" >/dev/null 2>&1; then
+            echo "Public IP exists."
+          else
+            az network public-ip create \
+              --resource-group "$RG_NAME" \
+              --name "${VM_NAME}-ip" \
+              --allocation-method Static
+          fi
 
-      # ----------------------------
-      # VM CREATION
-      # ----------------------------
-
-      - name: Create VM (password-based)
+      - name: Create NIC
         run: |
-          az vm create \
-            --resource-group "$RG_NAME" \
-            --name "$VM_NAME" \
-            --image Ubuntu2204 \
-            --admin-username "$ADMIN_USER" \
-            --admin-password "$ADMIN_PASS" \
-            --nics "${VM_NAME}-nic" \
-            --size Standard_B1s
+          if az network nic show --resource-group "$RG_NAME" --name "${VM_NAME}-nic" >/dev/null 2>&1; then
+            echo "NIC exists."
+          else
+            az network nic create \
+              --resource-group "$RG_NAME" \
+              --name "${VM_NAME}-nic" \
+              --vnet-name ntms-vnet \
+              --subnet default \
+              --network-security-group "${VM_NAME}-nsg" \
+              --public-ip-address "${VM_NAME}-ip"
+          fi
 
-      - name: Get VM public IP
+      # --------------------------------------------------------------
+      # VM
+      # --------------------------------------------------------------
+      - name: Create VM (Idempotent)
+        run: |
+          if az vm show --resource-group "$RG_NAME" --name "$VM_NAME" >/dev/null 2>&1; then
+            echo "VM exists."
+          else
+            az vm create \
+              --resource-group "$RG_NAME" \
+              --name "$VM_NAME" \
+              --image Ubuntu2204 \
+              --admin-username "$ADMIN_USER" \
+              --admin-password "$ADMIN_PASS" \
+              --nics "${VM_NAME}-nic" \
+              --size Standard_B1s
+          fi
+
+      - name: Get VM IP
         id: getvmip
         run: |
-          ip=$(az vm list-ip-addresses --resource-group "$RG_NAME" --name "$VM_NAME" --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
-          echo "vm_ip=$ip" >> "$GITHUB_OUTPUT"
+          IP=$(az vm list-ip-addresses --resource-group "$RG_NAME" --name "$VM_NAME" \
+            --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
+          echo "vm_ip=$IP" >> $GITHUB_OUTPUT
 
-      # ----------------------------
-      # ENABLE MI + KV ACCESS
-      # ----------------------------
-
-      - name: Enable managed identity
+      # --------------------------------------------------------------
+      # MANAGED IDENTITY + KV ACCESS
+      # --------------------------------------------------------------
+      - name: Enable Managed Identity
         run: |
           az vm identity assign --resource-group "$RG_NAME" --name "$VM_NAME"
 
-      - name: Grant Key Vault GET to VM managed identity
+      - name: Allow VM to read Key Vault secret
         run: |
-          principal_id=$(az vm show --resource-group "$RG_NAME" --name "$VM_NAME" --query identity.principalId -o tsv)
-          az keyvault set-policy --name "$KV_NAME" --object-id "$principal_id" --secret-permissions get
+          PID=$(az vm show --resource-group "$RG_NAME" --name "$VM_NAME" --query identity.principalId -o tsv)
+          az keyvault set-policy \
+            --name "$KV_NAME" \
+            --object-id "$PID" \
+            --secret-permissions get
 
-      # ----------------------------
-      # DEPLOY APP TO VM
-      # ----------------------------
-      - name: Prepare folder on VM for deployment
+      # --------------------------------------------------------------
+      # PREPARE DEPLOYMENT FOLDER
+      # --------------------------------------------------------------
+      - name: Prepare folder on VM
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.getvmip.outputs.vm_ip }}
+          username: ${{ env.ADMIN_USER }}
+          password: ${{ secrets.VM_PASSWORD }}
+          script: |
+            sudo mkdir -p /opt/ntms-kv-blob-queue
+            sudo chown vmadmin:vmadmin /opt/ntms-kv-blob-queue
+
+      # --------------------------------------------------------------
+      # COPY SOURCE CODE
+      # --------------------------------------------------------------
+      - name: Copy repo to VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ steps.getvmip.outputs.vm_ip }}
+          username: vmadmin
+          password: ${{ secrets.VM_PASSWORD }}
+          source: "."
+          target: "/opt/ntms-kv-blob-queue"
+
+      # --------------------------------------------------------------
+      # CREATE setup.sh ON VM
+      # --------------------------------------------------------------
+      - name: Create setup.sh on VM
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.getvmip.outputs.vm_ip }}
           username: vmadmin
           password: ${{ secrets.VM_PASSWORD }}
           script: |
-            sudo mkdir -p /opt/ntms-kv-blob-queue
-            sudo chown vmadmin:vmadmin /opt/ntms-kv-blob-queue
-            sudo chmod 755 /opt/ntms-kv-blob-queue
+            sudo tee /opt/ntms-kv-blob-queue/setup.sh > /dev/null << 'EOF'
+#!/bin/bash
+set -e
+cd /opt/ntms-kv-blob-queue
 
-      - name: Copy repo to VM
-        uses: appleboy/scp-action@v0.1.7
-        with:
-          host: ${{ steps.getvmip.outputs.vm_ip }}
-          username: ${{ env.ADMIN_USER }}
-          password: ${{ secrets.VM_PASSWORD }}
-          source: "."
-          target: "/opt/ntms-kv-blob-queue"
+sudo apt update -y
+sudo apt install -y python3 python3-pip python3-venv
 
-      - name: Run setup script on VM
+if [ ! -d "venv" ]; then
+  python3 -m venv venv
+fi
+
+source venv/bin/activate
+
+pip install --upgrade pip
+pip install Flask azure-storage-blob azure-storage-queue Pillow azure-identity azure-keyvault-secrets
+
+mkdir -p templates logs
+
+pkill -f worker.py || true
+nohup python3 worker.py > logs/worker.log 2>&1 &
+
+pkill -f app.py || true
+nohup python3 app.py > logs/app.log 2>&1 &
+
+EOF
+
+            sudo chmod +x /opt/ntms-kv-blob-queue/setup.sh
+
+      # --------------------------------------------------------------
+      # RUN setup.sh
+      # --------------------------------------------------------------
+      - name: Run setup.sh on VM
         uses: appleboy/ssh-action@v1.1.0
         with:
           host: ${{ steps.getvmip.outputs.vm_ip }}
-          username: ${{ env.ADMIN_USER }}
+          username: vmadmin
           password: ${{ secrets.VM_PASSWORD }}
           script: |
             cd /opt/ntms-kv-blob-queue
-            chmod +x setup_storagequeue.sh
             export KEY_VAULT_URI="https://$KV_NAME.vault.azure.net/"
-            ./setup_storagequeue.sh
+            ./setup.sh
 
+      # --------------------------------------------------------------
+      # SYSTEMD SERVICES
+      # --------------------------------------------------------------
+      - name: Install systemd services
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.getvmip.outputs.vm_ip }}
+          username: vmadmin
+          password: ${{ secrets.VM_PASSWORD }}
+          script: |
+            sudo tee /etc/systemd/system/app.service > /dev/null << 'EOF'
+             [Unit]
+             Description=NTMS Flask App
+             After=network.target
+             [Service]
+             User=vmadmin
+             WorkingDirectory=/opt/ntms-kv-blob-queue
+             Environment="KEY_VAULT_URI=https://ntmsrhkv2.vault.azure.net/"
+             ExecStart=/opt/ntms-kv-blob-queue/venv/bin/python3 app.py
+             Restart=always
+             [Install]
+             WantedBy=multi-user.target
+             EOF
+
+            sudo tee /etc/systemd/system/worker.service > /dev/null << 'EOF'
+            [Unit]
+            Description=NTMS Queue Worker
+            After=network.target
+            [Service]
+            User=vmadmin
+            WorkingDirectory=/opt/ntms-kv-blob-queue
+            Environment="KEY_VAULT_URI=https://ntmsrhkv2.vault.azure.net/"
+            ExecStart=/opt/ntms-kv-blob-queue/venv/bin/python3 worker.py
+            Restart=always
+            [Install]
+            WantedBy=multi-user.target
+            EOF
+
+            sudo systemctl daemon-reload
+            sudo systemctl enable app.service worker.service
+            sudo systemctl restart app.service worker.service
+
+      - name: Completed
+        run: |
+          echo "Deployment successful!"
+          echo "VM IP: ${{ steps.getvmip.outputs.vm_ip }}"
+          echo "APP URL = http://${{ steps.getvmip.outputs.vm_ip }}:3000"
