@@ -12,136 +12,134 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
 
+    env:
+      RG_NAME: ntms-kv-vm-rg
+      LOCATION: centralindia
+      KV_NAME: ntmsrhkv
+      VM_NAME: ntmsqueuevm
+      ADMIN_USER: vmadmin
+      # STORAGE_NAME must be globally unique; using run id to avoid collisions
+      STORAGE_NAME: ntmsstor${{ github.run_id }}
+      QUEUE_NAME: image-processing-queue
+      UPLOADED_CONTAINER: uploaded-images
+      PROCESSED_CONTAINER: processed-images
+      SECRET_NAME: AZURE-STORAGE-CONNECTION-STRING
+      # ADMIN_PASS is read from secrets and becomes available as $ADMIN_PASS in run steps
+      ADMIN_PASS: ${{ secrets.VM_PASSWORD }}
+
     steps:
-      - name: Checkout Repo
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Azure Login
+      - name: Azure login
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Set environment values
+      - name: Create resource group
         run: |
-          echo "RG_NAME=ntms-kv-vm-rg" >> $GITHUB_ENV
-          echo "LOCATION=centralindia" >> $GITHUB_ENV
-          echo "KV_NAME=ntmsrhkv" >> $GITHUB_ENV
-          echo "VM_NAME=ntmsqueuevm" >> $GITHUB_ENV
-          echo "ADMIN_USER=vmadmin" >> $GITHUB_ENV
-          echo "ADMIN_PASS=${{ secrets.VM_PASSWORD }}" >> $GITHUB_ENV
-          echo "STORAGE_NAME=ntmsstor$(date +%s)" >> $GITHUB_ENV
-          echo "QUEUE_NAME=image-processing-queue" >> $GITHUB_ENV
-          echo "UPLOADED_CONTAINER=uploaded-images" >> $GITHUB_ENV
-          echo "PROCESSED_CONTAINER=processed-images" >> $GITHUB_ENV
-          echo "SECRET_NAME=AZURE-STORAGE-CONNECTION-STRING" >> $GITHUB_ENV
-
-      - name: Create Resource Group
-        run: |
-          az group create --name $RG_NAME --location $LOCATION
+          az group create --name "$RG_NAME" --location "$LOCATION"
 
       - name: Create Key Vault
         run: |
           az keyvault create \
-            --name $KV_NAME \
-            --resource-group $RG_NAME \
-            --location $LOCATION \
+            --name "$KV_NAME" \
+            --resource-group "$RG_NAME" \
+            --location "$LOCATION" \
             --enable-rbac-authorization false
 
       - name: Create Storage Account
         run: |
           az storage account create \
-            --name $STORAGE_NAME \
-            --resource-group $RG_NAME \
-            --location $LOCATION \
+            --name "$STORAGE_NAME" \
+            --resource-group "$RG_NAME" \
+            --location "$LOCATION" \
             --sku Standard_LRS \
             --kind StorageV2
 
-      - name: Get Storage Connection String
+      - name: Save storage connection string to Key Vault
         run: |
-          echo "STORAGE_CONN=$(az storage account show-connection-string --resource-group $RG_NAME --name $STORAGE_NAME -o tsv)" >> $GITHUB_ENV
+          conn=$(az storage account show-connection-string --resource-group "$RG_NAME" --name "$STORAGE_NAME" -o tsv)
+          if [ -z "$conn" ] || [ "$conn" = "null" ]; then
+            echo "Failed to get storage connection string" >&2
+            exit 1
+          fi
+          az keyvault secret set --vault-name "$KV_NAME" --name "$SECRET_NAME" --value "$conn"
 
-      - name: Save Connection String into Key Vault
+      - name: Create queue and blob containers
         run: |
-          az keyvault secret set --vault-name $KV_NAME --name $SECRET_NAME --value "$STORAGE_CONN"
+          az storage queue create --name "$QUEUE_NAME" --account-name "$STORAGE_NAME"
+          az storage container create --name "$UPLOADED_CONTAINER" --account-name "$STORAGE_NAME"
+          az storage container create --name "$PROCESSED_CONTAINER" --account-name "$STORAGE_NAME"
 
-      - name: Create Queue + Blob Containers
-        run: |
-          az storage queue create --name $QUEUE_NAME --account-name $STORAGE_NAME
-          az storage container create --name $UPLOADED_CONTAINER --account-name $STORAGE_NAME
-          az storage container create --name $PROCESSED_CONTAINER --account-name $STORAGE_NAME
-
-      - name: Create VNet + Subnet
+      - name: Create VNet and subnet
         run: |
           az network vnet create \
-            --resource-group $RG_NAME \
+            --resource-group "$RG_NAME" \
             --name ntms-vnet \
             --address-prefix 10.1.0.0/16 \
             --subnet-name default \
             --subnet-prefix 10.1.1.0/24
 
-      - name: Create Public IP
+      - name: Create public IP
         run: |
           az network public-ip create \
-            --resource-group $RG_NAME \
-            --name ${VM_NAME}-ip \
+            --resource-group "$RG_NAME" \
+            --name "${VM_NAME}-ip" \
             --allocation-method Static
 
       - name: Create NIC
         run: |
           az network nic create \
-            --resource-group $RG_NAME \
-            --name ${VM_NAME}-nic \
+            --resource-group "$RG_NAME" \
+            --name "${VM_NAME}-nic" \
             --vnet-name ntms-vnet \
             --subnet default \
-            --public-ip-address ${VM_NAME}-ip
+            --public-ip-address "${VM_NAME}-ip"
 
       - name: Create VM (password-based)
         run: |
           az vm create \
-            --resource-group $RG_NAME \
-            --name $VM_NAME \
+            --resource-group "$RG_NAME" \
+            --name "$VM_NAME" \
             --image Ubuntu2204 \
-            --admin-username $ADMIN_USER \
+            --admin-username "$ADMIN_USER" \
             --admin-password "$ADMIN_PASS" \
-            --nics ${VM_NAME}-nic \
+            --nics "${VM_NAME}-nic" \
             --size Standard_B1s
 
-      - name: Get VM Public IP
-        id: getip
+      - name: Get VM public IP
+        id: getvmip
         run: |
-          IP=$(az vm list-ip-addresses --resource-group $RG_NAME --name $VM_NAME --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
-          if [ -z "$IP" ] || [ "$IP" = "null" ]; then
-            echo "Failed to fetch VM IP" >&2
+          ip=$(az vm list-ip-addresses --resource-group "$RG_NAME" --name "$VM_NAME" --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
+          if [ -z "$ip" ] || [ "$ip" = "null" ]; then
+            echo "Could not get VM IP" >&2
             exit 1
           fi
-          echo "VM_IP=$IP" >> $GITHUB_ENV
-          echo "VM_IP=$IP"
+          echo "vm_ip=$ip" >> "$GITHUB_OUTPUT"
 
-      - name: Enable Managed Identity on VM
+      - name: Enable managed identity
         run: |
-          az vm identity assign --resource-group $RG_NAME --name $VM_NAME
+          az vm identity assign --resource-group "$RG_NAME" --name "$VM_NAME"
 
-      - name: Grant Key Vault secret GET permission to VM
+      - name: Grant Key Vault GET to VM managed identity
         run: |
-          PRINCIPAL_ID=$(az vm show --resource-group $RG_NAME --name $VM_NAME --query identity.principalId -o tsv)
-          if [ -z "$PRINCIPAL_ID" ] || [ "$PRINCIPAL_ID" = "null" ]; then
-            echo "Failed to fetch principal id" >&2
+          principal_id=$(az vm show --resource-group "$RG_NAME" --name "$VM_NAME" --query identity.principalId -o tsv)
+          if [ -z "$principal_id" ] || [ "$principal_id" = "null" ]; then
+            echo "Could not get VM principal id" >&2
             exit 1
           fi
-          az keyvault set-policy \
-            --name $KV_NAME \
-            --object-id $PRINCIPAL_ID \
-            --secret-permissions get
+          az keyvault set-policy --name "$KV_NAME" --object-id "$principal_id" --secret-permissions get
 
       - name: Open port 3000 on VM
         run: |
-          az vm open-port --resource-group $RG_NAME --name $VM_NAME --port 3000 --priority 300
+          az vm open-port --resource-group "$RG_NAME" --name "$VM_NAME" --port 3000 --priority 300
 
       - name: Copy repo to VM
         uses: appleboy/scp-action@v0.1.7
         with:
-          host: ${{ env.VM_IP }}
-          username: vmadmin
+          host: ${{ steps.getvmip.outputs.vm_ip }}
+          username: ${{ env.ADMIN_USER }}
           password: ${{ secrets.VM_PASSWORD }}
           source: "."
           target: "/opt/ntms-kv-blob-queue"
@@ -149,24 +147,26 @@ jobs:
       - name: Run setup script on VM
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ env.VM_IP }}
-          username: vmadmin
+          host: ${{ steps.getvmip.outputs.vm_ip }}
+          username: ${{ env.ADMIN_USER }}
           password: ${{ secrets.VM_PASSWORD }}
           script: |
+            set -e
             cd /opt/ntms-kv-blob-queue || exit 1
             chmod +x setup_storagequeue.sh || true
             export KEY_VAULT_URI="https://$KV_NAME.vault.azure.net/"
             ./setup_storagequeue.sh
 
-      - name: Install systemd services
+      - name: Install and enable systemd services on VM
         uses: appleboy/ssh-action@v1.1.0
         with:
-          host: ${{ env.VM_IP }}
-          username: vmadmin
+          host: ${{ steps.getvmip.outputs.vm_ip }}
+          username: ${{ env.ADMIN_USER }}
           password: ${{ secrets.VM_PASSWORD }}
           script: |
-            # create app.service using sudo + tee; quoted heredoc prevents accidental expansion
-            sudo tee /etc/systemd/system/app.service > /dev/null <<'APP_SERVICE_EOF'
+            set -e
+            # create app.service (literal content; no variable expansion)
+            sudo tee /etc/systemd/system/app.service > /dev/null <<'APP_EOF'
 [Unit]
 Description=NTMS Flask App (StorageQueue + KeyVault)
 After=network.target
@@ -181,10 +181,10 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-APP_SERVICE_EOF
+APP_EOF
 
             # create worker.service
-            sudo tee /etc/systemd/system/worker.service > /dev/null <<'WORKER_SERVICE_EOF'
+            sudo tee /etc/systemd/system/worker.service > /dev/null <<'WORKER_EOF'
 [Unit]
 Description=NTMS Queue Worker
 After=network.target
@@ -199,11 +199,13 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-WORKER_SERVICE_EOF
+WORKER_EOF
 
             sudo systemctl daemon-reload
             sudo systemctl enable app.service worker.service
             sudo systemctl restart app.service worker.service
 
       - name: Completed
-        run: echo "Deployment successful! VM IP: ${{ env.VM_IP }}"
+        run: |
+          echo "Deployment finished. VM IP: ${{ steps.getvmip.outputs.vm_ip }}"
+          echo "App URL: http://${{ steps.getvmip.outputs.vm_ip }}:3000"
