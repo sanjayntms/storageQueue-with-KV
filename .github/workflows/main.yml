@@ -247,30 +247,30 @@ jobs:
           password: ${{ secrets.VM_PASSWORD }}
           script: |
             sudo tee /opt/ntms-kv-blob-queue/setup.sh > /dev/null << 'EOF'
-#!/bin/bash
-set -e
-cd /opt/ntms-kv-blob-queue
+            #!/bin/bash
+            set -e
+            cd /opt/ntms-kv-blob-queue
 
-sudo apt update -y
-sudo apt install -y python3 python3-pip python3-venv
+            sudo apt update -y
+            sudo apt install -y python3 python3-pip python3-venv
 
-if [ ! -d "venv" ]; then
-  python3 -m venv venv
-fi
+            if [ ! -d "venv" ]; then
+            python3 -m venv venv
+            fi
 
-source venv/bin/activate
+            source venv/bin/activate
 
-pip install --upgrade pip
-pip install Flask azure-storage-blob azure-storage-queue Pillow azure-identity azure-keyvault-secrets
+            pip install --upgrade pip
+            pip install Flask azure-storage-blob azure-storage-queue Pillow azure-identity azure-keyvault-secrets
 
-mkdir -p templates logs
+            mkdir -p templates logs
 
-pkill -f worker.py || true
-nohup python3 worker.py > logs/worker.log 2>&1 &
+            pkill -f worker.py || true
+            nohup python3 worker.py > logs/worker.log 2>&1 &
 
-pkill -f app.py || true
-nohup python3 app.py > logs/app.log 2>&1 &
-EOF
+            pkill -f app.py || true
+            nohup python3 app.py > logs/app.log 2>&1 &
+            EOF
 
             sudo chmod +x /opt/ntms-kv-blob-queue/setup.sh
 
