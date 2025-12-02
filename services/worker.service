@@ -1,0 +1,13 @@
+[Unit]
+Description=NTMS Queue Worker
+After=network.target
+
+[Service]
+User=vmadmin
+WorkingDirectory=/opt/ntms-kv-blob-queue
+Environment=KEY_VAULT_URI=https://ntmsrhkv2.vault.azure.net/
+ExecStart=/opt/ntms-kv-blob-queue/venv/bin/python3 worker.py
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
