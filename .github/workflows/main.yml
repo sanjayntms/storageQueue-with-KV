@@ -1,4 +1,3 @@
-# .github/workflows/main.yml
 name: Deploy Full StorageQueue + KV + VM
 
 on:
@@ -15,16 +14,14 @@ jobs:
     env:
       RG_NAME: ntms-kv-vm-rg
       LOCATION: centralindia
-      KV_NAME: ntmsrhkv2
+      KV_NAME: ntmsrhkv
       VM_NAME: ntmsqueuevm
       ADMIN_USER: vmadmin
-      # STORAGE_NAME must be globally unique; using run id to avoid collisions
       STORAGE_NAME: ntmsstor${{ github.run_id }}
       QUEUE_NAME: image-processing-queue
       UPLOADED_CONTAINER: uploaded-images
       PROCESSED_CONTAINER: processed-images
       SECRET_NAME: AZURE-STORAGE-CONNECTION-STRING
-      # ADMIN_PASS is read from secrets and becomes available as $ADMIN_PASS in run steps
       ADMIN_PASS: ${{ secrets.VM_PASSWORD }}
 
     steps:
@@ -60,10 +57,6 @@ jobs:
       - name: Save storage connection string to Key Vault
         run: |
           conn=$(az storage account show-connection-string --resource-group "$RG_NAME" --name "$STORAGE_NAME" -o tsv)
-          if [ -z "$conn" ] || [ "$conn" = "null" ]; then
-            echo "Failed to get storage connection string" >&2
-            exit 1
-          fi
           az keyvault secret set --vault-name "$KV_NAME" --name "$SECRET_NAME" --value "$conn"
 
       - name: Create queue and blob containers
@@ -81,6 +74,32 @@ jobs:
             --subnet-name default \
             --subnet-prefix 10.1.1.0/24
 
+      # ----------------------------
+      # CREATE NSG + RULE FOR PORT 3000
+      # ----------------------------
+
+      - name: Create NSG
+        run: |
+          az network nsg create \
+            --resource-group "$RG_NAME" \
+            --name "${VM_NAME}-nsg"
+
+      - name: Create NSG rule for port 3000
+        run: |
+          az network nsg rule create \
+            --resource-group "$RG_NAME" \
+            --nsg-name "${VM_NAME}-nsg" \
+            --name allow-3000 \
+            --protocol Tcp \
+            --priority 300 \
+            --destination-port-ranges 3000 \
+            --access Allow \
+            --direction Inbound
+
+      # ----------------------------
+      # PUBLIC IP + NIC WITH NSG
+      # ----------------------------
+
       - name: Create public IP
         run: |
           az network public-ip create \
@@ -88,14 +107,19 @@ jobs:
             --name "${VM_NAME}-ip" \
             --allocation-method Static
 
-      - name: Create NIC
+      - name: Create NIC (attach NSG)
         run: |
           az network nic create \
             --resource-group "$RG_NAME" \
             --name "${VM_NAME}-nic" \
             --vnet-name ntms-vnet \
             --subnet default \
+            --network-security-group "${VM_NAME}-nsg" \
             --public-ip-address "${VM_NAME}-ip"
+
+      # ----------------------------
+      # VM CREATION
+      # ----------------------------
 
       - name: Create VM (password-based)
         run: |
@@ -112,11 +136,11 @@ jobs:
         id: getvmip
         run: |
           ip=$(az vm list-ip-addresses --resource-group "$RG_NAME" --name "$VM_NAME" --query "[0].virtualMachine.network.publicIpAddresses[0].ipAddress" -o tsv)
-          if [ -z "$ip" ] || [ "$ip" = "null" ]; then
-            echo "Could not get VM IP" >&2
-            exit 1
-          fi
           echo "vm_ip=$ip" >> "$GITHUB_OUTPUT"
+
+      # ----------------------------
+      # ENABLE MI + KV ACCESS
+      # ----------------------------
 
       - name: Enable managed identity
         run: |
@@ -125,15 +149,11 @@ jobs:
       - name: Grant Key Vault GET to VM managed identity
         run: |
           principal_id=$(az vm show --resource-group "$RG_NAME" --name "$VM_NAME" --query identity.principalId -o tsv)
-          if [ -z "$principal_id" ] || [ "$principal_id" = "null" ]; then
-            echo "Could not get VM principal id" >&2
-            exit 1
-          fi
           az keyvault set-policy --name "$KV_NAME" --object-id "$principal_id" --secret-permissions get
 
-      - name: Open port 3000 on VM
-        run: |
-          az vm open-port --resource-group "$RG_NAME" --name "$VM_NAME" --port 3000 --priority 300
+      # ----------------------------
+      # DEPLOY APP TO VM
+      # ----------------------------
 
       - name: Copy repo to VM
         uses: appleboy/scp-action@v0.1.7
@@ -151,10 +171,8 @@ jobs:
           username: ${{ env.ADMIN_USER }}
           password: ${{ secrets.VM_PASSWORD }}
           script: |
-            set -e
-            cd /opt/ntms-kv-blob-queue || exit 1
-            chmod +x setup_storagequeue.sh || true
+            cd /opt/ntms-kv-blob-queue
+            chmod +x setup_storagequeue.sh
             export KEY_VAULT_URI="https://$KV_NAME.vault.azure.net/"
             ./setup_storagequeue.sh
 
-      
