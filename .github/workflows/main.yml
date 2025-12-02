@@ -14,7 +14,7 @@ jobs:
     env:
       RG_NAME: ntms-kv-vm-rg
       LOCATION: centralindia
-      KV_NAME: ntmsrhkv
+      KV_NAME: ntmsrhkv2
       VM_NAME: ntmsqueuevm
       ADMIN_USER: vmadmin
       STORAGE_NAME: ntmsstor${{ github.run_id }}
