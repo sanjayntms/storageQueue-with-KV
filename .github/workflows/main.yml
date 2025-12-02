@@ -37,13 +37,19 @@ jobs:
         run: |
           az group create --name "$RG_NAME" --location "$LOCATION"
 
-      - name: Create Key Vault
+      - name: Create Key Vault (Idempotent)
         run: |
-          az keyvault create \
-            --name "$KV_NAME" \
-            --resource-group "$RG_NAME" \
-            --location "$LOCATION" \
-            --enable-rbac-authorization false
+          if az keyvault show --name "$KV_NAME" --resource-group "$RG_NAME" >/dev/null 2>&1; then
+            echo "Key Vault $KV_NAME already exists. Skipping creation."
+          else
+            echo "Creating Key Vault $KV_NAME..."
+            az keyvault create \
+              --name "$KV_NAME" \
+              --resource-group "$RG_NAME" \
+              --location "$LOCATION" \
+              --enable-rbac-authorization false
+          fi
+
 
       - name: Create Storage Account
         run: |
