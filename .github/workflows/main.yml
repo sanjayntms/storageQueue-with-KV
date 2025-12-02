@@ -1,0 +1,213 @@
+name: Deploy Full StorageQueue + KV + VM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ------------------------------
+      # CHECKOUT REPO
+      # ------------------------------
+      - name: Checkout Repo
+        uses: actions/checkout@v4
+
+      # ------------------------------
+      # AZURE LOGIN
+      # ------------------------------
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      # ------------------------------
+      # ENV VARIABLES
+      # ------------------------------
+      - name: Set environment values
+        run: |
+          echo "RG_NAME=ntms-kv-vm-rg" >> $GITHUB_ENV
+          echo "LOCATION=centralindia" >> $GITHUB_ENV
+          echo "KV_NAME=ntmsrhkv" >> $GITHUB_ENV
+          echo "VM_NAME=ntmsqueuevm" >> $GITHUB_ENV
+          echo "ADMIN_USER=vmadmin" >> $GITHUB_ENV
+          echo "ADMIN_PASS=${{ secrets.VM_PASSWORD }}" >> $GITHUB_ENV
+          echo "STORAGE_NAME=ntmsstor$(date +%s)" >> $GITHUB_ENV
+          echo "QUEUE_NAME=image-processing-queue" >> $GITHUB_ENV
+          echo "UPLOADED_CONTAINER=uploaded-images" >> $GITHUB_ENV
+          echo "PROCESSED_CONTAINER=processed-images" >> $GITHUB_ENV
+          echo "SECRET_NAME=AZURE-STORAGE-CONNECTION-STRING" >> $GITHUB_ENV
+
+      # ------------------------------
+      # RESOURCE GROUP
+      # ------------------------------
+      - name: Create Resource Group
+        run: |
+          az group create \
+             --name $RG_NAME \
+             --location $LOCATION
+
+      # ------------------------------
+      # KEY VAULT
+      # ------------------------------
+      - name: Create Key Vault
+        run: |
+          az keyvault create \
+            --name $KV_NAME \
+            --resource-group $RG_NAME \
+            --location $LOCATION \
+            --enable-rbac-authorization false
+
+      # ------------------------------
+      # STORAGE ACCOUNT
+      # ------------------------------
+      - name: Create Storage Account
+        run: |
+          az storage account create \
+            --name $STORAGE_NAME \
+            --resource-group $RG_NAME \
+            --location $LOCATION \
+            --sku Standard_LRS \
+            --kind StorageV2
+
+      # Get connection string
+      - name: Get Storage Connection String
+        run: |
+          CONN=$(az storage account show-connection-string \
+            --resource-group $RG_NAME \
+            --name $STORAGE_NAME \
+            -o tsv)
+          echo "STORAGE_CONN=$CONN" >> $GITHUB_ENV
+
+      # Save to key vault
+      - name: Save Connection String to Key Vault
+        run: |
+          az keyvault secret set \
+            --vault-name $KV_NAME \
+            --name $SECRET_NAME \
+            --value "$STORAGE_CONN"
+
+      # Queue
+      - name: Create Queue
+        run: |
+          az storage queue create \
+            --name $QUEUE_NAME \
+            --account-name $STORAGE_NAME
+
+      # Containers
+      - name: Create Blob Containers
+        run: |
+          az storage container create \
+            --name $UPLOADED_CONTAINER \
+            --account-name $STORAGE_NAME
+          az storage container create \
+            --name $PROCESSED_CONTAINER \
+            --account-name $STORAGE_NAME
+
+      # ------------------------------
+      # NETWORK + IP + NIC
+      # ------------------------------
+      - name: Create VNet + Subnet
+        run: |
+          az network vnet create \
+            --resource-group $RG_NAME \
+            --name ntms-vnet \
+            --address-prefix 10.1.0.0/16 \
+            --subnet-name default \
+            --subnet-prefix 10.1.1.0/24
+
+      - name: Public IP
+        run: |
+          az network public-ip create \
+            --resource-group $RG_NAME \
+            --name ${VM_NAME}-ip \
+            --allocation-method Static
+
+      - name: NIC
+        run: |
+          az network nic create \
+            --resource-group $RG_NAME \
+            --name ${VM_NAME}-nic \
+            --vnet-name ntms-vnet \
+            --subnet default \
+            --public-ip-address ${VM_NAME}-ip
+
+      # ------------------------------
+      # VM CREATION (USERNAME + PASSWORD)
+      # ------------------------------
+      - name: Create VM
+        run: |
+          az vm create \
+            --resource-group $RG_NAME \
+            --name $VM_NAME \
+            --image Ubuntu2204 \
+            --admin-username $ADMIN_USER \
+            --admin-password "$ADMIN_PASS" \
+            --nics ${VM_NAME}-nic \
+            --size Standard_B1s
+
+      # ------------------------------
+      # ENABLE MANAGED IDENTITY
+      # ------------------------------
+      - name: Enable MI
+        run: |
+          az vm identity assign \
+            --resource-group $RG_NAME \
+            --name $VM_NAME
+
+      - name: Grant KV Secret GET
+        run: |
+          PRINCIPAL_ID=$(az vm show \
+            --resource-group $RG_NAME \
+            --name $VM_NAME \
+            --query identity.principalId -o tsv)
+
+          az keyvault set-policy \
+            --name $KV_NAME \
+            --object-id $PRINCIPAL_ID \
+            --secret-permissions get
+
+      # Open 3000 for Flask
+      - name: Open port 3000
+        run: |
+          az vm open-port \
+            --resource-group $RG_NAME \
+            --name $VM_NAME \
+            --port 3000 \
+            --priority 300
+
+      # ------------------------------
+      # COPY APP FILES TO VM
+      # ------------------------------
+      - name: Copy repo content to VM
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VM_PUBLIC_IP }}
+          username: vmadmin
+          password: ${{ secrets.VM_PASSWORD }}
+          source: "."
+          target: "/opt/ntms-kv-blob-queue"
+
+      # ------------------------------
+      # RUN SETUP SCRIPT ON VM
+      # ------------------------------
+      - name: Run setup on VM
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ secrets.VM_PUBLIC_IP }}
+          username: vmadmin
+          password: ${{ secrets.VM_PASSWORD }}
+          script: |
+            cd /opt/ntms-kv-blob-queue
+            chmod +x setup_storagequeue.sh
+            export KEY_VAULT_URI="https://$KV_NAME.vault.azure.net/"
+            ./setup_storagequeue.sh
+
+      - name: Completed
+        run: echo "Deployment fully completed!"
