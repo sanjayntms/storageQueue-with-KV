@@ -177,6 +177,16 @@ jobs:
       # ----------------------------
       # DEPLOY APP TO VM
       # ----------------------------
+      - name: Prepare folder on VM for deployment
+        uses: appleboy/ssh-action@v1.1.0
+        with:
+          host: ${{ steps.getvmip.outputs.vm_ip }}
+          username: vmadmin
+          password: ${{ secrets.VM_PASSWORD }}
+          script: |
+            sudo mkdir -p /opt/ntms-kv-blob-queue
+            sudo chown vmadmin:vmadmin /opt/ntms-kv-blob-queue
+            sudo chmod 755 /opt/ntms-kv-blob-queue
 
       - name: Copy repo to VM
         uses: appleboy/scp-action@v0.1.7
