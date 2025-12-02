@@ -102,6 +102,23 @@ jobs:
             --access Allow \
             --direction Inbound
 
+      - name: Create NSG rule for SSH (port 22)
+        run: |
+          if az network nsg rule show --resource-group "$RG_NAME" --nsg-name "${VM_NAME}-nsg" --name allow-22 >/dev/null 2>&1; then
+            echo "SSH rule exists."
+          else
+            az network nsg rule create \
+              --resource-group "$RG_NAME" \
+              --nsg-name "${VM_NAME}-nsg" \
+              --name allow-22 \
+              --protocol Tcp \
+              --priority 200 \
+              --destination-port-ranges 22 \
+              --access Allow \
+              --direction Inbound
+          fi
+
+
       # ----------------------------
       # PUBLIC IP + NIC WITH NSG
       # ----------------------------
