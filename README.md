@@ -12,6 +12,6 @@
 * python3 worker.py &
 * python3 app.py # Open NSG 3000 port
 * Access public ip of linux VM, upload image and see result
-* stop worker.py, upload image and check queue
-* start worker.py and check status of queue
+* stop worker.py, upload image and check queue #sudo systemctl stop worker.service
+* start worker.py and check status of queue #sudo systemctl start worker.service
 # Assign RBAC role kv secrets user to Service Principal if deployment fails.
