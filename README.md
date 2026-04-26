@@ -14,4 +14,4 @@
 * Access public ip of linux VM, upload image and see result
 * stop worker.py, upload image and check queue
 * start worker.py and check status of queue
-# Assign RBAC role kv secrets user if deployment fails.
+# Assign RBAC role kv secrets user to Service Principal if deployment fails.
